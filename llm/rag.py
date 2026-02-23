@@ -803,6 +803,37 @@ class ExcelRAG:
                 "business meaning",
             )
         )
+        # "What is this file about?" / "What's inside?" / "Describe the file" / "What is this project about?"
+        overview_question = any(
+            phrase in q_lower
+            for phrase in (
+                "what is this file",
+                "what is the file",
+                "what's in this file",
+                "what is in this file",
+                "what does this file contain",
+                "what does the file contain",
+                "describe the file",
+                "describe this file",
+                "what is this dataset",
+                "what is this data",
+                "what is this table",
+                "what is this project about",
+                "what is the project about",
+                "what is this about",
+                "what's inside",
+                "what is inside",
+                "what kind of data",
+                "what type of data",
+                "tell me about this file",
+                "explain this file",
+                "summary of the file",
+                "file summary",
+                "overview of the file",
+                "what information",
+                "what does it contain",
+            )
+        )
         wants_all_details = any(
             phrase in q_lower
             for phrase in (
@@ -825,11 +856,19 @@ class ExcelRAG:
         elif wants_all_details:
             effective_k = min(50, len(self._chunks))
             effective_k = max(effective_k, top_k)
+        elif overview_question:
+            # For "what is this file about?" use a few sample rows so the model can describe content
+            effective_k = min(10, len(self._chunks))
+            effective_k = max(effective_k, top_k)
         else:
             effective_k = top_k
         # Stay under Groq token-per-request limit (e.g. 6k); cap rows sent in one call
         effective_k = min(effective_k, MAX_ROWS_PER_REQUEST)
-        chunks = self.query(question=question, top_k=effective_k)
+        # For "what is this file about?" use first N rows so we always have a concrete sample to describe
+        if overview_question and self._chunks:
+            chunks = sorted(self._chunks, key=lambda c: c.row_index)[:effective_k]
+        else:
+            chunks = self.query(question=question, top_k=effective_k)
 
         if not chunks:
             return {
@@ -862,6 +901,14 @@ class ExcelRAG:
                 "(1) Technical: which columns look like keys or IDs (e.g. *._id, *.id), likely foreign-key links, one-to-many or id-to-name pairs, and how you would join or link tables. "
                 "(2) Social/plain language: what the relationships mean in real-world or business terms (e.g. 'A Project has an Owner', 'Contact is the person on the lead', 'Account is the company or customer'). "
                 "Use the schema summary and the row examples above. If a link is only inferred, say 'likely' or 'appears to'. Keep it clear and concise."
+            )
+        elif overview_question:
+            instruction = (
+                "The user is asking what this file or dataset is about. Using ONLY the schema summary and total row count above, and the sample rows below, describe: "
+                "(1) what kind of data this is (e.g. projects, contacts, parcels, CRM records); "
+                "(2) the main columns and what they represent; "
+                "(3) how many records there are. "
+                "You may briefly mention 1–2 example values from the sample rows. Be specific and base your answer only on the information provided—do not say you don't have access or don't know; you have the schema and sample rows."
             )
         elif wants_all_details:
             instruction = (
@@ -919,9 +966,11 @@ class ExcelRAG:
             system_prompt = system_prompt.rstrip() + "\n\n" + personalisation
         try:
             client = LLMClient()
-            # Allow long answers when user asks for relationships, full details, or many rows
+            # Allow long answers when user asks for relationships, full details, overview, or many rows
             if relation_question:
                 max_tok = 2048  # technical + social explanation can be long
+            elif overview_question:
+                max_tok = 512  # file/dataset description: schema + examples
             elif wants_many_rows:
                 max_tok = 2048  # listing many rows needs more output
             elif wants_all_details:
