@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>King County Chat</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg-primary: #212121;
+        --bg-secondary: #2f2f2f;
+        --bg-tertiary: #3f3f3f;
+        --bg-input: #40414f;
+        --border: rgba(255, 255, 255, 0.1);
+        --text-primary: #ececec;
+        --text-secondary: #c5c5c5;
+        --accent: #10a37f;
+        --accent-hover: #1a7f64;
+        --user-msg-bg: #2f2f2f;
+        --assistant-msg-bg: transparent;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        height: 100%;
+        -webkit-text-size-adjust: 100%;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        min-height: -webkit-fill-available;
+        font-family: "Söhne", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        background: var(--bg-primary);
+        color: var(--text-primary);
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+      }
+
+      /* Sidebar */
+      .app-sidebar {
+        position: fixed;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 260px;
+        background: var(--bg-primary);
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        z-index: 100;
+      }
+
+      .sidebar-header {
+        flex-shrink: 0;
+        min-height: 52px;
+        display: flex;
+        align-items: center;
+        padding: 0 12px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .new-chat-btn {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: transparent;
+        color: var(--text-primary);
+        font-size: 14px;
+        cursor: pointer;
+        transition: background 0.15s ease;
+      }
+
+      .new-chat-btn:hover {
+        background: var(--bg-secondary);
+      }
+
+      .new-chat-btn svg {
+        flex-shrink: 0;
+      }
+
+      .sidebar-personalisation {
+        flex-shrink: 0;
+        padding: 12px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .user-name-label {
+        display: block;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 6px;
+      }
+
+      .user-name-input {
+        width: 100%;
+        padding: 8px 10px;
+        font-size: 14px;
+        color: var(--text-primary);
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        outline: none;
+        box-sizing: border-box;
+      }
+
+      .user-name-input::placeholder {
+        color: var(--text-secondary);
+      }
+
+      .user-name-input:focus {
+        border-color: var(--accent);
+      }
+
+      .sidebar-history {
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        padding: 8px 0;
+      }
+
+      .sidebar-history-title {
+        padding: 8px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .sidebar-history-list {
+        flex: 1;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        padding: 0 12px;
+      }
+
+      .sidebar-history-list:empty::before {
+        content: "No conversations yet";
+        display: block;
+        padding: 12px 0;
+        font-size: 13px;
+        color: var(--text-secondary);
+      }
+
+      .history-item {
+        display: block;
+        width: 100%;
+        padding: 12px 12px;
+        margin-bottom: 2px;
+        border: none;
+        border-radius: 8px;
+        background: transparent;
+        font-size: 14px;
+        line-height: 1.4;
+        color: var(--text-primary);
+        text-align: left;
+        cursor: pointer;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        transition: background 0.15s ease;
+      }
+
+      .history-item:hover {
+        background: var(--bg-secondary);
+      }
+
+      .history-item.active {
+        background: var(--bg-secondary);
+        color: var(--accent);
+      }
+
+      .sidebar-footer {
+        margin-top: auto;
+        padding: 12px;
+        border-top: 1px solid var(--border);
+      }
+
+      .sidebar-footer .history-check {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: var(--text-secondary);
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .sidebar-footer .history-check input {
+        width: 16px;
+        height: 16px;
+        accent-color: var(--accent);
+      }
+
+      /* Main area */
+      .app-main {
+        flex: 1;
+        margin-left: 260px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+
+      .main-header {
+        flex-shrink: 0;
+        min-height: 52px;
+        display: flex;
+        align-items: center;
+        padding: 0 16px;
+        border-bottom: 1px solid var(--border);
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+
+      .chat-view {
+        flex: 1;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        padding: 24px 0 120px;
+      }
+
+      .chat-view-inner {
+        max-width: 48rem;
+        margin: 0 auto;
+        padding: 0 16px;
+      }
+
+      .message-block {
+        display: flex;
+        gap: 16px;
+        padding: 24px 0;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .message-block:last-child {
+        border-bottom: none;
+      }
+
+      .message-block.user {
+        background: var(--user-msg-bg);
+        margin: 0 -16px;
+        padding-left: 16px;
+        padding-right: 16px;
+      }
+
+      .message-avatar {
+        flex-shrink: 0;
+        width: 30px;
+        height: 30px;
+        border-radius: 4px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .message-block.user .message-avatar {
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .message-block.assistant .message-avatar {
+        background: var(--bg-tertiary);
+        color: var(--text-secondary);
+      }
+
+      .message-content {
+        flex: 1;
+        min-width: 0;
+        font-size: 15px;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .message-block.assistant .message-content {
+        color: var(--text-primary);
+      }
+
+      .message-block.user .message-content {
+        color: var(--text-primary);
+      }
+
+      .message-attachment {
+        margin-top: 6px;
+        font-size: 12px;
+        color: var(--text-secondary);
+      }
+
+      .message-attachment::before {
+        content: "📎 ";
+      }
+
+      /* Empty state */
+      .chat-empty {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 40vh;
+        padding: 24px;
+        text-align: center;
+      }
+
+      .chat-empty h1 {
+        font-size: 28px;
+        font-weight: 600;
+        color: var(--text-primary);
+        margin: 0 0 8px;
+      }
+
+      .chat-empty p {
+        font-size: 15px;
+        color: var(--text-secondary);
+        margin: 0;
+      }
+
+      /* Input area - ChatGPT style */
+      .input-area {
+        position: fixed;
+        bottom: 0;
+        left: 260px;
+        right: 0;
+        padding: 16px 16px 8px;
+        background: linear-gradient(transparent, var(--bg-primary) 20%);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .selected-file-bar {
+        width: 100%;
+        max-width: 48rem;
+        display: none;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        margin-bottom: 4px;
+        border-radius: 8px;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        font-size: 13px;
+      }
+
+      .selected-file-bar.visible {
+        display: flex;
+      }
+
+      .selected-file-label {
+        color: var(--text-secondary);
+        flex-shrink: 0;
+      }
+
+      .selected-file-name {
+        color: var(--accent);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .clear-file-btn {
+        flex-shrink: 0;
+        width: 24px;
+        height: 24px;
+        border: none;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--text-secondary);
+        font-size: 18px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .clear-file-btn:hover {
+        background: var(--bg-tertiary);
+        color: var(--text-primary);
+      }
+
+      .input-area-inner {
+        width: 100%;
+        max-width: 48rem;
+        margin: 0 auto;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--bg-input);
+        padding: 12px 16px;
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+      }
+
+      .input-area-inner:focus-within {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px var(--accent);
+      }
+
+      .file-input-hidden {
+        position: absolute;
+        width: 0;
+        height: 0;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .file-btn {
+        flex-shrink: 0;
+        width: 36px;
+        height: 36px;
+        border: none;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--text-secondary);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.15s, color 0.15s;
+      }
+
+      .file-btn:hover {
+        background: var(--bg-tertiary);
+        color: var(--text-primary);
+      }
+
+      .file-btn.has-file {
+        color: var(--accent);
+      }
+
+      .file-btn.has-file .file-name-dot {
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--accent);
+      }
+
+      .file-btn-wrap {
+        position: relative;
+      }
+
+      #chat-input {
+        flex: 1;
+        min-height: 24px;
+        max-height: 200px;
+        padding: 8px 0;
+        border: none;
+        background: transparent;
+        color: var(--text-primary);
+        font-size: 15px;
+        font-family: inherit;
+        line-height: 1.5;
+        resize: none;
+        outline: none;
+      }
+
+      #chat-input::placeholder {
+        color: var(--text-secondary);
+      }
+
+      .send-btn {
+        flex-shrink: 0;
+        width: 36px;
+        height: 36px;
+        border: none;
+        border-radius: 8px;
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.15s;
+      }
+
+      .send-btn:hover:not(:disabled) {
+        background: var(--accent-hover);
+      }
+
+      .send-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .send-btn svg {
+        width: 18px;
+        height: 18px;
+      }
+
+      /* Status - minimal */
+      .status-bar {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        font-size: 11px;
+        color: var(--text-secondary);
+      }
+
+      .status-bar .status-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #6b6b6b;
+        flex-shrink: 0;
+      }
+
+      .status-bar .status-dot.idle {
+        background: #6b6b6b;
+      }
+
+      .status-bar .status-dot.error {
+        background: #ef4444;
+      }
+
+      /* Mobile: hide sidebar */
+      @media (max-width: 768px) {
+        .app-sidebar {
+          width: 0;
+          overflow: hidden;
+          border: none;
+        }
+
+        .app-main {
+          margin-left: 0;
+        }
+
+        .input-area,
+        .status-bar {
+          left: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="app-sidebar">
+      <div class="sidebar-header">
+        <button type="button" class="new-chat-btn" id="new-chat-btn" title="New chat">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+          New chat
+        </button>
+      </div>
+      <div class="sidebar-personalisation">
+        <label class="user-name-label" for="user-name-input">Your name</label>
+        <input type="text" id="user-name-input" class="user-name-input" placeholder="Optional" maxlength="64" autocomplete="name" />
+      </div>
+      <div class="sidebar-history">
+        <div class="sidebar-history-title">History</div>
+        <div id="sidebar-history-list" class="sidebar-history-list"></div>
+      </div>
+      <div class="sidebar-footer">
+        <label class="history-check">
+          <input type="checkbox" id="save-history-check" />
+          <span>Save to history & continue with same chat</span>
+        </label>
+      </div>
+    </aside>
+
+    <main class="app-main">
+      <header class="main-header">King County Chat</header>
+
+      <div class="chat-view" id="chat-view">
+        <div class="chat-view-inner">
+          <div id="chat-messages" class="chat-messages"></div>
+          <div id="chat-empty" class="chat-empty">
+            <h1>How can I help you today?</h1>
+            <p>Ask anything about King County or attach a file (CSV, Excel, PDF, Word, etc.) to query your data.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="input-area">
+        <div class="selected-file-bar" id="selected-file-bar">
+          <span class="selected-file-label">Selected:</span>
+          <span id="selected-file-name" class="selected-file-name"></span>
+          <button type="button" id="clear-file-btn" class="clear-file-btn" title="Remove file">×</button>
+        </div>
+        <div class="input-area-inner">
+          <div class="file-btn-wrap">
+            <input type="file" id="file-input" accept=".csv,.json,.txt,.xlsx,.xls,.xlsm,.docx,.pdf,text/csv,application/json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="file-input-hidden" />
+            <button type="button" id="file-trigger" class="file-btn" title="Attach file">
+              <span class="file-name-dot"></span>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <path d="M12 18v-6"/><path d="M9 15h6"/>
+              </svg>
+            </button>
+          </div>
+          <textarea id="chat-input" placeholder="Message King County Chat…" rows="1"></textarea>
+          <button type="button" id="chat-send" class="send-btn" title="Send">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+            </svg>
+          </button>
+        </div>
+        <div class="status-bar">
+          <span class="status-dot idle" id="status-dot"></span>
+          <span id="chat-status-text">Idle</span>
+        </div>
+      </div>
+    </main>
+
+    <script src="./main.js" type="module"></script>
+  </body>
+</html>
