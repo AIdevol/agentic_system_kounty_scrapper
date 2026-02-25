@@ -108,6 +108,11 @@ class ExcelRAG:
     - Turns each row into textual representation; stores embeddings + metadata for retrieval.
     """
 
+    # def makeToData(self, 
+    # dataset_path: str| None = None
+    # ) -> None:
+    # if
+
     def __init__(
         self,
         dataset_path: str | None = None,

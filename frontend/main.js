@@ -1,4 +1,18 @@
-const API_BASE = "http://127.0.0.1:8000";
+// Use same origin when frontend is served with the API (public access); fallback to localhost for local dev.
+function getApiBase() {
+  try {
+    const o = window.location;
+    if (o.origin && !o.origin.startsWith("file:")) {
+      if (o.hostname === "localhost" || o.hostname === "http://192.168.31.185") {
+        if (o.port === "8000") return "";
+        return "http://192.168.31.185:8000";
+      }
+      return "";
+    }
+  } catch (e) {}
+  return "http://192.168.31.185:8000";
+}
+const API_BASE = getApiBase();
 const CONVERSATIONS_KEY = "chat_conversations";
 const LAST_CONVERSATION_ID_KEY = "chat_last_conversation_id";
 const SAVE_HISTORY_CHECKED_KEY = "save_history_checked";

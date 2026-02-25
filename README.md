@@ -50,6 +50,17 @@ The API will be available at `http://127.0.0.1:8000`.
 
 - Interactive docs (Swagger): `http://127.0.0.1:8000/docs`
 - ReDoc docs: `http://127.0.0.1:8000/redoc`
+- **Frontend (public chat UI):** `http://127.0.0.1:8000/app/` — the app serves the frontend so anyone with the URL can use it.
+
+### Public access (anyone on the network or internet)
+
+To allow others to open the frontend and use the app:
+
+1. Run the server bound to all interfaces: `make public` or `uvicorn app.main:app --host 0.0.0.0 --port 8000`.
+2. Share the URL: `http://<your-ip>:8000/` or `http://<your-ip>:8000/app/`. Root redirects to `/app/`.
+3. The frontend automatically uses the same host for API calls, so no extra config is needed.
+
+Behind Nginx or a reverse proxy, use your public domain (e.g. `https://yourdomain.com/app/`).
 
 ---
 
