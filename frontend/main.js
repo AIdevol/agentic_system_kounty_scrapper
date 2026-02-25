@@ -1,16 +1,22 @@
-// Use same origin when frontend is served with the API (public access); fallback to localhost for local dev.
+// Set this to your current ngrok URL when exposing the API publicly.
+const NGROK_API_BASE = "https://crinkliest-mirna-loftier.ngrok-free.dev";
+
+// Use ngrok override first; otherwise same-origin/public and localhost fallbacks.
 function getApiBase() {
+  if (NGROK_API_BASE) return NGROK_API_BASE.replace(/\/+$/, "");
+
   try {
     const o = window.location;
     if (o.origin && !o.origin.startsWith("file:")) {
-      if (o.hostname === "localhost" || o.hostname === "http://192.168.31.185") {
+      if (o.hostname === "localhost" || o.hostname === "127.0.0.1") {
         if (o.port === "8000") return "";
-        return "http://192.168.31.185:8000";
+        return "http://127.0.0.1:8000";
       }
+      if (o.port && o.port !== "8000") return `${o.protocol}//${o.hostname}:8000`;
       return "";
     }
   } catch (e) {}
-  return "http://192.168.31.185:8000";
+  return "http://127.0.0.1:8000";
 }
 const API_BASE = getApiBase();
 const CONVERSATIONS_KEY = "chat_conversations";
