@@ -46,6 +46,37 @@ class RAGChunk:
     embedding: List[float]
 
 
+def _chunk_text(text: str, chunk_size: int = 1200, overlap: int = 180) -> List[str]:
+    """
+    Split long free-form text into overlapping chunks for better document RAG.
+    """
+    s = (text or "").strip()
+    if not s:
+        return []
+    if len(s) <= chunk_size:
+        return [s]
+
+    chunks: List[str] = []
+    start = 0
+    n = len(s)
+    while start < n:
+        end = min(start + chunk_size, n)
+        window = s[start:end]
+        # Try to break on sentence/newline near the end to keep chunks readable.
+        if end < n:
+            split_at = max(window.rfind("\n\n"), window.rfind(". "), window.rfind("\n"))
+            if split_at > int(chunk_size * 0.55):
+                end = start + split_at + 1
+                window = s[start:end]
+        chunk = window.strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= n:
+            break
+        start = max(0, end - overlap)
+    return chunks
+
+
 def parse_table_input(table: Union[str, List[Any]]) -> List[Dict[str, Any]]:
     """
     Parse user-provided table into a list of record dicts (one per row).
@@ -490,12 +521,18 @@ class ExcelRAG:
         """
         q = question.lower().strip()
         num_pattern = r"[\d.]+"
-        # Between / range: "between 0.3 and 1 acre", "0.5 to 2 acres", "acre range 0.3 - 1"
+        # Between / range: "between 0.3 and 1 acre", "0.5 to 2 acres", "acre range 0.3 - 1", "b/w 1.5 to 3 acres"
         m = re.search(
             r"(?:between|from)\s+(" + num_pattern + r")\s+(?:and|to|-)\s+(" + num_pattern + r")\s*(?:acre|acres)?",
             q,
             re.I,
         )
+        if not m:
+            m = re.search(
+                r"(?:b/w|bw|btw)\s+(" + num_pattern + r")\s*(?:and|to|-)\s*(" + num_pattern + r")\s*(?:acre|acres)?",
+                q,
+                re.I,
+            )
         if not m:
             m = re.search(
                 r"(?:acre\s+)?range\s+(" + num_pattern + r")\s*(?:to|-)\s+(" + num_pattern + r")",
@@ -547,6 +584,85 @@ class ExcelRAG:
             except ValueError:
                 pass
         return (None, None, None)
+
+    @staticmethod
+    def _parse_requested_amount(question: str) -> int | None:
+        """
+        Parse requested count from user text, including formats like:
+        - "50 rows", "give me 30"
+        - "2k records", "1.5k rows"
+        """
+        q = (question or "").lower().strip()
+        if not q:
+            return None
+
+        # e.g. 2k, 1.5k
+        m = re.search(r"\b(\d+(?:\.\d+)?)\s*k\s*(?:data|records?|rows?|details?|entries)?\b", q, re.I)
+        if m:
+            try:
+                return max(1, min(int(float(m.group(1)) * 1000), 2000))
+            except ValueError:
+                pass
+
+        # e.g. 50 rows / 50 records
+        m = re.search(r"\b(\d+)\s*(?:data|records?|rows?|details?|entries)\b", q, re.I)
+        if m:
+            try:
+                return max(1, min(int(m.group(1)), 2000))
+            except ValueError:
+                pass
+
+        # e.g. give me 50
+        m = re.search(r"(?:give me|show me|get me|list|fetch)\s*(\d+)", q, re.I)
+        if m:
+            try:
+                return max(1, min(int(m.group(1)), 2000))
+            except ValueError:
+                pass
+
+        return None
+
+    @staticmethod
+    def _to_csv_text(rows: List[Dict[str, Any]], max_rows: int) -> str:
+        """Render rows as CSV text for export-like requests."""
+        use_rows = rows[:max_rows]
+        if not use_rows:
+            return "No rows available."
+
+        headers: List[str] = []
+        seen = set()
+        for r in use_rows:
+            for k in r.keys():
+                ks = str(k)
+                if ks not in seen:
+                    seen.add(ks)
+                    headers.append(ks)
+
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader()
+        for r in use_rows:
+            writer.writerow({h: r.get(h, "") for h in headers})
+        return buf.getvalue().strip()
+
+    @staticmethod
+    def _rows_to_brief_lines(rows: List[Dict[str, Any]], max_rows: int) -> str:
+        """Render deterministic row list for 'give me N rows' style asks."""
+        use_rows = rows[:max_rows]
+        if not use_rows:
+            return "No matching rows found."
+        lines: List[str] = []
+        for idx, r in enumerate(use_rows, start=1):
+            parcel = r.get("Parcel ID") or r.get("id") or r.get("ID") or "-"
+            owner = r.get("Owner Placeholder Name") or r.get("owner_name") or "-"
+            acres = r.get("Acres") or "-"
+            lv = r.get("Land Value") or r.get("value") or "-"
+            addr = r.get("Address") or "-"
+            contact = r.get("Contact Info") or r.get("email") or "-"
+            lines.append(
+                f"{idx}. Parcel ID: {parcel} | Owner: {owner} | Acres: {acres} | Land Value: {lv} | Address: {addr} | Contact: {contact}"
+            )
+        return "\n".join(lines)
 
     @staticmethod
     def _parse_owner_filter(question: str) -> str | None:
@@ -720,19 +836,72 @@ class ExcelRAG:
         return [c for _, c in scored[:top_k]]
 
     @staticmethod
+    def _looks_weak_answer(answer: str) -> bool:
+        """
+        Detect generic/non-grounded answers and trigger a retry with broader context.
+        """
+        a = (answer or "").strip().lower()
+        if not a:
+            return True
+        weak_markers = (
+            "i don't have access",
+            "i do not have access",
+            "i'm not able to access",
+            "cannot access the file",
+            "could you provide more context",
+            "could you share",
+            "i couldn't find matching data",
+            "i can't find matching data",
+            "not enough information",
+            "i am not sure",
+            "i'm not sure",
+            "unfortunately",
+        )
+        return any(m in a for m in weak_markers)
+
+    @staticmethod
+    def _merge_unique_chunks(primary: List["RAGChunk"], secondary: List["RAGChunk"], max_total: int = 12) -> List["RAGChunk"]:
+        """
+        Merge two chunk lists by unique row_index, preserving order preference.
+        """
+        out: List[RAGChunk] = []
+        seen: set[int] = set()
+        for chunk in primary + secondary:
+            if chunk.row_index in seen:
+                continue
+            out.append(chunk)
+            seen.add(chunk.row_index)
+            if len(out) >= max_total:
+                break
+        return out
+
+    @staticmethod
     def _is_behavioral_or_smalltalk_question(question: str) -> bool:
         """Detect casual chat that should not be forced through dataset retrieval."""
         q = (question or "").strip().lower()
         if not q:
             return False
 
+        q_words = set(re.findall(r"[a-z0-9]+", q))
+
+        def has_marker(marker: str) -> bool:
+            marker = marker.lower().strip()
+            if not marker:
+                return False
+            # Phrase marker: use substring match.
+            if " " in marker:
+                return marker in q
+            # Single word marker: require whole-word match (avoid "hi" in "this").
+            return marker in q_words
+
         # If data intent is present, keep the normal RAG path.
         data_markers = (
             "record", "records", "row", "rows", "dataset", "table", "data", "count",
             "how many", "list", "show", "filter", "owner", "parcel", "acre",
-            "land value", "zoning", "json", "csv", "column",
+            "land value", "zoning", "json", "csv", "column", "file", "pdf", "docx",
+            "document", "upload", "attached", "attachment",
         )
-        if any(marker in q for marker in data_markers):
+        if any(has_marker(marker) for marker in data_markers):
             return False
 
         chat_markers = (
@@ -740,7 +909,7 @@ class ExcelRAG:
             "what can you do", "thank you", "thanks", "good morning", "good evening",
             "are you there", "what's up", "how's it going", "do you remember me",
         )
-        return any(marker in q for marker in chat_markers)
+        return any(has_marker(marker) for marker in chat_markers)
 
     async def answer(
         self,
@@ -784,6 +953,7 @@ class ExcelRAG:
             return {"answer": answer, "contexts": []}
 
         q_lower = question.lower().strip()
+        q_words = re.findall(r"[a-z0-9]+", q_lower)
         relation_question = any(
             phrase in q_lower
             for phrase in (
@@ -847,14 +1017,49 @@ class ExcelRAG:
                 "details of all", "all rows", "entire file", "whole file",
             )
         )
-        # Detect "give me N data", "50 records", "N rows", etc. and use that as requested count
+        property_browse_question = (
+            "property" in q_lower
+            and any(
+                phrase in q_lower
+                for phrase in (
+                    "some property",
+                    "about property",
+                    "about some property",
+                    "tell me about",
+                    "show property",
+                    "give property",
+                )
+            )
+        )
+        long_answer_intent = any(
+            phrase in q_lower
+            for phrase in (
+                "explain in detail",
+                "detailed explanation",
+                "step by step",
+                "why does",
+                "why is",
+                "analysis",
+                "deep dive",
+                "elaborate",
+                "comprehensive",
+            )
+        )
+        # Detect "give me N data", "2k records", etc.
         requested_n: int | None = None
         if not wants_all_details:
-            match = re.search(r"\b(\d+)\s*(data|records?|rows?|details?|entries)\b", q_lower, re.IGNORECASE)
-            if not match:
-                match = re.search(r"(?:give me|show me|get me|list|fetch)\s*(\d+)", q_lower)
-            if match:
-                requested_n = min(int(match.group(1)), 100)
+            requested_n = self._parse_requested_amount(q_lower)
+
+        csv_request = any(k in q_lower for k in ("csv", "download csv", "export csv"))
+        owner_list_request = any(k in q_lower for k in ("all owner", "land owner", "owner list", "all the owner"))
+        generic_list_request = (
+            any(k in q_lower for k in ("list", "show", "give me", "fetch"))
+            and not csv_request
+        )
+        avg_value_request = (
+            any(k in q_lower for k in ("avg", "average", "mean"))
+            and any(k in q_lower for k in ("land value", "property", "cost", "rate", "price"))
+        )
         if requested_n is not None:
             effective_k = min(requested_n, len(self._chunks), 100)
             effective_k = max(effective_k, top_k)
@@ -866,7 +1071,8 @@ class ExcelRAG:
             effective_k = min(10, len(self._chunks))
             effective_k = max(effective_k, top_k)
         else:
-            effective_k = top_k
+            # Slightly broader retrieval helps open-ended DB questions.
+            effective_k = max(top_k, 8)
         # Stay under Groq token-per-request limit (e.g. 6k); cap rows sent in one call
         effective_k = min(effective_k, MAX_ROWS_PER_REQUEST)
         # For "what is this file about?" use first N rows so we always have a concrete sample to describe
@@ -881,11 +1087,82 @@ class ExcelRAG:
                 "contexts": [],
             }
 
+        # Reuse filter parsing for deterministic utilities (csv/list/avg).
+        land_value_op, land_value_num, land_value_high = self._parse_land_value_filter(question)
+        land_use_kw = self._parse_land_use_filter(question)
+        acre_op, acre_val, acre_high = self._parse_acre_filter(question)
+        owner_name = self._parse_owner_filter(question)
+
+        # Deterministic response paths for DB-style utility asks.
+        comparison_rows = self.query_by_comparison(
+            question,
+            land_value_op=land_value_op,
+            land_value_num=land_value_num,
+            land_value_high=land_value_high,
+            land_use_keyword=land_use_kw,
+            acre_op=acre_op,
+            acre_val=acre_val,
+            acre_high=acre_high,
+            owner_name=owner_name,
+            max_results=max(2000, requested_n or 50),
+        )
+        selected_rows = [c.metadata for c in (comparison_rows if comparison_rows else self._chunks)]
+
+        if avg_value_request:
+            vals = [self._to_float(r.get("Land Value")) for r in selected_rows]
+            nums = [v for v in vals if v is not None]
+            if nums:
+                avg_v = sum(nums) / len(nums)
+                min_v = min(nums)
+                max_v = max(nums)
+                return {
+                    "answer": (
+                        f"Average Land Value: {avg_v:,.2f} (based on {len(nums)} rows). "
+                        f"Range: {min_v:,.0f} to {max_v:,.0f}."
+                    ),
+                    "contexts": [{"row_index": c.row_index, "metadata": c.metadata, "text": c.text} for c in chunks],
+                }
+
+        if csv_request:
+            req = requested_n or len(selected_rows)
+            csv_text = self._to_csv_text(selected_rows, max_rows=min(req, 2000))
+            return {
+                "answer": csv_text,
+                "contexts": [{"row_index": c.row_index, "metadata": c.metadata, "text": c.text} for c in chunks],
+            }
+
+        range_query_request = (
+            land_value_op is not None
+            or land_use_kw is not None
+            or acre_op is not None
+            or owner_name is not None
+        )
+
+        if wants_all_details or requested_n is not None or owner_list_request or generic_list_request or range_query_request:
+            # Priority:
+            # 1) explicit requested amount (e.g. 25, 2k)
+            # 2) for range/filter queries, return all matching rows in view
+            # 3) otherwise, keep a practical default for generic list asks
+            if requested_n is not None:
+                req = requested_n
+            elif range_query_request:
+                req = len(selected_rows)
+            else:
+                req = 50 if generic_list_request else len(selected_rows)
+            req = min(req, 2000)
+            lines = self._rows_to_brief_lines(selected_rows, max_rows=req)
+            return {
+                "answer": f"Showing {min(req, len(selected_rows))} rows:\n{lines}",
+                "contexts": [{"row_index": c.row_index, "metadata": c.metadata, "text": c.text} for c in chunks],
+            }
+
         context_blocks = []
         for c in chunks:
             row_text = c.text
-            if len(row_text) > MAX_ROW_TEXT_CHARS:
-                row_text = row_text[:MAX_ROW_TEXT_CHARS].rstrip() + "..."
+            # For document-like uploads, allow a larger snippet per chunk.
+            row_text_cap = 1000 if ("content:" in row_text and len(row_text) > 450) else MAX_ROW_TEXT_CHARS
+            if len(row_text) > row_text_cap:
+                row_text = row_text[:row_text_cap].rstrip() + "..."
             context_blocks.append(f"- ROW {c.row_index}: {row_text}")
 
         context_str = "\n".join(context_blocks)
@@ -899,6 +1176,34 @@ class ExcelRAG:
 
         wants_many_rows = wants_all_details or (requested_n is not None)
         is_comparison = len(chunks) > 5 and not wants_many_rows
+        short_answer_intent = (
+            not relation_question
+            and not overview_question
+            and not wants_many_rows
+            and not property_browse_question
+            and not long_answer_intent
+            and len(q_words) <= 12
+            and (
+                q_lower.endswith("?")
+                or any(
+                    q_lower.startswith(prefix)
+                    for prefix in (
+                        "is ",
+                        "are ",
+                        "can ",
+                        "do ",
+                        "does ",
+                        "did ",
+                        "what ",
+                        "who ",
+                        "when ",
+                        "where ",
+                        "which ",
+                        "how many ",
+                    )
+                )
+            )
+        )
         if relation_question:
             instruction = (
                 "The user is asking about relationships or how the data is structured. "
@@ -915,6 +1220,11 @@ class ExcelRAG:
                 "(3) how many records there are. "
                 "You may briefly mention 1–2 example values from the sample rows. Be specific and base your answer only on the information provided—do not say you don't have access or don't know; you have the schema and sample rows."
             )
+        elif property_browse_question:
+            instruction = (
+                "The user is asking generally about properties. Provide a short overview and then give 3 concrete property examples from the rows below. "
+                "For each example include Parcel ID, Address, Land Value, Land Use, and Owner if present."
+            )
         elif wants_all_details:
             instruction = (
                 "The user asked for ALL or FULL details. List or summarize the rows below. Do not reply with only the record count. Say something like 'Here are details from your file' or 'Summary of the data' and then list the key columns/values for as many rows as shown below. You can group or summarize if there are many; include at least several concrete examples."
@@ -927,6 +1237,11 @@ class ExcelRAG:
         elif is_comparison:
             instruction = (
                 "This is a comparison/filter result. Summarize: total count of matching rows; key columns and ranges when present; and 2-3 example rows. Keep to a short paragraph or bullets."
+            )
+        elif short_answer_intent:
+            instruction = (
+                "This is a short question. Return only a short direct answer (one line, max ~20 words). "
+                "No extra explanation unless the user asks for details."
             )
         else:
             instruction = (
@@ -976,6 +1291,8 @@ class ExcelRAG:
                 max_tok = 2048  # technical + social explanation can be long
             elif overview_question:
                 max_tok = 512  # file/dataset description: schema + examples
+            elif short_answer_intent:
+                max_tok = 96  # short question => short response
             elif wants_many_rows:
                 max_tok = 2048  # listing many rows needs more output
             elif wants_all_details:
@@ -991,6 +1308,43 @@ class ExcelRAG:
                 temperature=0.2,
                 max_tokens=max_tok,
             )
+
+            # If first pass is weak/generic, retry once with broader context and stricter grounding.
+            if self._looks_weak_answer(answer) and self._chunks:
+                try:
+                    wider_k = min(max(len(chunks) + 4, 10), MAX_ROWS_PER_REQUEST)
+                    broader_chunks = self.query(question=question, top_k=wider_k)
+                    retry_chunks = self._merge_unique_chunks(chunks, broader_chunks, max_total=MAX_ROWS_PER_REQUEST)
+
+                    retry_blocks = []
+                    for c in retry_chunks:
+                        row_text = c.text
+                        row_text_cap = 1000 if ("content:" in row_text and len(row_text) > 450) else MAX_ROW_TEXT_CHARS
+                        if len(row_text) > row_text_cap:
+                            row_text = row_text[:row_text_cap].rstrip() + "..."
+                        retry_blocks.append(f"- ROW {c.row_index}: {row_text}")
+
+                    retry_prompt = (
+                        f"{conversation_prefix}"
+                        f"Current question: {question}\n\n"
+                        f"{count_info}"
+                        f"Schema/relationship summary:\n{schema_summary or 'Schema summary unavailable.'}\n\n"
+                        f"Rows from the table:\n" + "\n".join(retry_blocks) + "\n\n"
+                        "Answer strictly from these rows. Do not say you lack access to file/data. "
+                        "If exact value is unavailable, state what is available and provide closest relevant details."
+                    )
+                    answer_retry = await client.complete(
+                        model="llama-3.1-8b-instant",
+                        system_prompt=system_prompt,
+                        user_prompt=retry_prompt,
+                        temperature=0.2,
+                        max_tokens=max_tok,
+                    )
+                    if not self._looks_weak_answer(answer_retry):
+                        answer = answer_retry
+                        chunks = retry_chunks
+                except Exception:
+                    pass
         except Exception as e:
             err_msg = str(e).lower()
             # Request too large for Groq (e.g. 413 / 6k TPM limit)
@@ -1092,9 +1446,9 @@ def _pdf_to_records(content: bytes) -> List[Dict[str, Any]]:
     import io
     import pdfplumber
     records: List[Dict[str, Any]] = []
-    text_parts: List[str] = []
+    text_chunk_records: List[Dict[str, Any]] = []
     with pdfplumber.open(io.BytesIO(content)) as pdf:
-        for page in pdf.pages:
+        for page_num, page in enumerate(pdf.pages, start=1):
             tables = page.extract_tables()
             if tables:
                 for table in tables:
@@ -1108,12 +1462,19 @@ def _pdf_to_records(content: bytes) -> List[Dict[str, Any]]:
                         records.append(dict(zip(headers, vals[: len(headers)])))
             t = (page.extract_text() or "").strip()
             if t:
-                text_parts.append(t)
+                for chunk_idx, chunk in enumerate(_chunk_text(t), start=1):
+                    text_chunk_records.append(
+                        {
+                            "content": chunk,
+                            "source_type": "pdf_text",
+                            "page": page_num,
+                            "chunk": chunk_idx,
+                        }
+                    )
     if records:
         return records
-    full_text = "\n\n".join(text_parts).strip()
-    if full_text:
-        return [{"content": full_text}]
+    if text_chunk_records:
+        return text_chunk_records
     return []
 
 
@@ -1137,7 +1498,16 @@ def _docx_to_records(content: bytes) -> List[Dict[str, Any]]:
         return records
     parts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
     if parts:
-        return [{"content": "\n\n".join(parts)}]
+        joined = "\n\n".join(parts)
+        chunks = _chunk_text(joined)
+        return [
+            {
+                "content": chunk,
+                "source_type": "docx_text",
+                "chunk": idx + 1,
+            }
+            for idx, chunk in enumerate(chunks)
+        ]
     return []
 
 
@@ -1167,6 +1537,18 @@ def parse_uploaded_file(content: bytes, filename: str) -> List[Dict[str, Any]]:
             text = content.decode("latin-1")
     text = text.lstrip("\ufeff")
     records = parse_table_input(text)
+    # If text isn't tabular, still make it queryable as document chunks.
+    if not records:
+        chunks = _chunk_text(text)
+        if chunks:
+            return [
+                {
+                    "content": chunk,
+                    "source_type": "text",
+                    "chunk": idx + 1,
+                }
+                for idx, chunk in enumerate(chunks)
+            ]
     return records
 
 

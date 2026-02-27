@@ -290,6 +290,84 @@ function readFileAsText(file) {
   });
 }
 
+function renderStructuredTableFromContexts(contexts) {
+  const container = $("table-view");
+  const table = $("table-view-table");
+  if (!container || !table) return;
+  const thead = table.querySelector("thead");
+  const tbody = table.querySelector("tbody");
+  if (!thead || !tbody) return;
+
+  if (!Array.isArray(contexts) || contexts.length === 0) {
+    container.style.display = "none";
+    thead.innerHTML = "";
+    tbody.innerHTML = "";
+    return;
+  }
+
+  // Collect headers from metadata keys
+  const metaRows = contexts
+    .map((c) => c && c.metadata)
+    .filter((m) => m && typeof m === "object");
+  if (!metaRows.length) {
+    container.style.display = "none";
+    thead.innerHTML = "";
+    tbody.innerHTML = "";
+    return;
+  }
+
+  const headerSet = new Set();
+  for (const row of metaRows) {
+    for (const k of Object.keys(row)) {
+      headerSet.add(String(k));
+    }
+  }
+  const headers = Array.from(headerSet);
+  if (!headers.length) {
+    container.style.display = "none";
+    thead.innerHTML = "";
+    tbody.innerHTML = "";
+    return;
+  }
+
+  // Render header
+  thead.innerHTML = "";
+  const trHead = document.createElement("tr");
+  for (const h of headers) {
+    const th = document.createElement("th");
+    th.textContent = h;
+    th.style.padding = "4px 6px";
+    th.style.borderBottom = "1px solid var(--border)";
+    th.style.position = "sticky";
+    th.style.top = "0";
+    th.style.background = "var(--bg-secondary)";
+    th.style.textAlign = "left";
+    trHead.appendChild(th);
+  }
+  thead.appendChild(trHead);
+
+  // Render body (limit to 2000 rows but usually much less)
+  tbody.innerHTML = "";
+  const MAX_ROWS = 2000;
+  const rowsToRender = metaRows.slice(0, MAX_ROWS);
+  for (const row of rowsToRender) {
+    const tr = document.createElement("tr");
+    for (const h of headers) {
+      const td = document.createElement("td");
+      td.textContent = row[h] != null ? String(row[h]) : "";
+      td.style.padding = "3px 6px";
+      td.style.borderBottom = "1px solid var(--border)";
+      td.style.whiteSpace = "nowrap";
+      td.style.textOverflow = "ellipsis";
+      td.style.overflow = "hidden";
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+
+  container.style.display = "block";
+}
+
 async function sendChat() {
   const input = $("chat-input");
   const fileInput = $("file-input");
@@ -360,6 +438,14 @@ async function sendChat() {
     let answerText = (data.answer || "").trim() || "I couldn't find matching data for that question.";
     if (/data not available in the (dataset|table)|no relevant rows were found/i.test(answerText)) {
       answerText = "I couldn't find matching data for that question.";
+    }
+
+    // If the backend returned structured contexts (real rows), render them as a spreadsheet-style table.
+    if (Array.isArray(data.contexts) && data.contexts.length > 0) {
+      renderStructuredTableFromContexts(data.contexts);
+    } else {
+      // Hide table when there is no structured data for this answer.
+      renderStructuredTableFromContexts([]);
     }
     setChatStatus("idle", "Writing…");
     appendMessageWithTypewriter(answerText, 18, () => {
