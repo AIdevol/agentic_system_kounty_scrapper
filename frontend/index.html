@@ -88,6 +88,21 @@
         flex-shrink: 0;
       }
 
+      .sidebar-close-btn {
+        display: none;
+        margin-left: 8px;
+        padding: 6px;
+        border: none;
+        background: transparent;
+        color: var(--text-secondary);
+        cursor: pointer;
+        border-radius: 999px;
+      }
+
+      .sidebar-close-btn:hover {
+        background: var(--bg-secondary);
+      }
+
       .sidebar-personalisation {
         flex-shrink: 0;
         padding: 12px;
@@ -537,12 +552,17 @@
         background: #ef4444;
       }
 
-      /* Mobile: hide sidebar */
+      /* Mobile: turn sidebar into slide-in drawer */
       @media (max-width: 768px) {
         .app-sidebar {
-          width: 0;
-          overflow: hidden;
-          border: none;
+          transform: translateX(-100%);
+          transition: transform 0.2s ease-out;
+          width: 260px;
+          border-right: 1px solid var(--border);
+        }
+
+        .app-sidebar.open {
+          transform: translateX(0);
         }
 
         .app-main {
@@ -552,6 +572,12 @@
         .input-area,
         .status-bar {
           left: 0;
+        }
+
+        .sidebar-close-btn {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
         }
       }
     </style>
@@ -564,6 +590,11 @@
             <path d="M12 5v14M5 12h14"/>
           </svg>
           New chat
+        </button>
+        <button type="button" class="sidebar-close-btn" id="sidebar-close" title="Close history">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 6L6 18M6 6l12 12" />
+          </svg>
         </button>
       </div>
       <div class="sidebar-personalisation">
@@ -583,7 +614,18 @@
     </aside>
 
     <main class="app-main">
-      <header class="main-header">King County Chat</header>
+      <header class="main-header">
+        <button
+          type="button"
+          id="sidebar-toggle"
+          style="margin-right: 12px; display: none; background: transparent; border: none; color: inherit; padding: 4px; cursor: pointer;"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 6h18M3 12h14M3 18h18" />
+          </svg>
+        </button>
+        King County Chat
+      </header>
 
       <div class="chat-view" id="chat-view">
         <div class="chat-view-inner">

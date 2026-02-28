@@ -440,13 +440,49 @@ async function sendChat() {
       answerText = "I couldn't find matching data for that question.";
     }
 
-    // If the backend returned structured contexts (real rows), render them as a spreadsheet-style table.
-    if (Array.isArray(data.contexts) && data.contexts.length > 0) {
+    const hasContexts = Array.isArray(data.contexts) && data.contexts.length > 0;
+    const wantsTableOnly =
+      /\btable\s+view\b/i.test(text) ||
+      /\btable\s+only\b/i.test(text) ||
+      /\bonly\s+table\b/i.test(text) ||
+      /\bspreadsheet\b/i.test(text) ||
+      /\btable\s+format\b/i.test(text) ||
+      /\btabular\b/i.test(text) ||
+      /\btable\s*data\b/i.test(text) ||
+      /\b\d+\s*(?:table|data|rows?)\b/i.test(text) ||
+      (hasContexts && /\b(?:give me|show me|get me|list|fetch)\s*(?:the\s+)?\d+\s*(?:table|data|rows?)?/i.test(text));
+
+    // Show table when user asks for table/data/rows or when response is "Showing N rows" with contexts.
+    const answerIsRowList = /^Showing\s+\d+\s+rows:/i.test((data.answer || "").trim());
+    const showTable = hasContexts && (wantsTableOnly || answerIsRowList);
+
+    if (showTable) {
       renderStructuredTableFromContexts(data.contexts);
+      setChatStatus("idle", "Ready");
+      const rowCount = data.contexts.length;
+      appendMessage("assistant", `Here are ${rowCount} row${rowCount !== 1 ? "s" : ""} in table view.`);
+      return;
     } else {
-      // Hide table when there is no structured data for this answer.
       renderStructuredTableFromContexts([]);
     }
+
+    const wantsExcelDownload =
+      /\b(xlsx|excel|spreadsheet)\b/i.test(text) ||
+      /\b(download|export)\s+(xlsx|excel|spreadsheet)\b/i.test(text);
+
+    const looksLikeCsv =
+      typeof answerText === "string" &&
+      answerText.includes("\n") &&
+      /[,;\t]/.test(answerText.split("\n", 1)[0] || "");
+
+    if (wantsExcelDownload && looksLikeCsv) {
+      // Trigger a client-side download that can be opened in Excel.
+      triggerDownloadFromText(answerText, "dataset_export.xlsx");
+      setChatStatus("idle", "Ready");
+      appendMessage("assistant", "I’ve prepared the data as an Excel-ready file and started the download.");
+      return;
+    }
+
     setChatStatus("idle", "Writing…");
     appendMessageWithTypewriter(answerText, 18, () => {
       setChatStatus("idle", "Ready");
@@ -457,6 +493,22 @@ async function sendChat() {
     setChatStatus("error", "Error");
   } finally {
     $("chat-send").disabled = false;
+  }
+}
+
+function triggerDownloadFromText(text, filename) {
+  try {
+    const blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error("Failed to trigger download", e);
   }
 }
 
@@ -504,6 +556,30 @@ function main() {
 
   const newChatBtn = $("new-chat-btn");
   if (newChatBtn) newChatBtn.addEventListener("click", clearChat);
+
+  // Mobile: toggle sidebar (history drawer)
+  const sidebarToggle = $("sidebar-toggle");
+  const sidebarEl = document.querySelector(".app-sidebar");
+  const sidebarClose = $("sidebar-close");
+  if (sidebarToggle && sidebarEl) {
+    // Show the toggle button only on small screens via JS as well (defensive).
+    function updateToggleVisibility() {
+      sidebarToggle.style.display = window.innerWidth <= 768 ? "inline-flex" : "none";
+      if (window.innerWidth > 768) {
+        sidebarEl.classList.remove("open");
+      }
+    }
+    updateToggleVisibility();
+    window.addEventListener("resize", updateToggleVisibility);
+    sidebarToggle.addEventListener("click", () => {
+      sidebarEl.classList.toggle("open");
+    });
+    if (sidebarClose) {
+      sidebarClose.addEventListener("click", () => {
+        sidebarEl.classList.remove("open");
+      });
+    }
+  }
 
   const fileInput = $("file-input");
   const fileTrigger = $("file-trigger");

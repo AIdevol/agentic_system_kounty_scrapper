@@ -21,6 +21,7 @@ from llm.prompts import (
     TABLE_DATASET_SYSTEM_PROMPT,
     get_personalisation_system_snippet,
 )
+from llm.parcel_value_model import predict_land_value_for_parcel_id
 
 load_dotenv()
 
@@ -517,10 +518,13 @@ class ExcelRAG:
         Parse question for acre range. Returns (operator, value1, value2).
         - Single: (">=", 0.5, None), ("<=", 1.0, None), (">", 0.25, None), ("<", 2.0, None)
         - Range: ("between", 0.3, 1.0)
-        Supports: acres above 0.5, over 1 acre, below 2 acres, between 0.3 and 1 acre, acre range 0.5 to 2.
+        Supports: acres above 0.5, over 1 acre, below 2 acres, between 0.3 and 1 acre, acre range 0.5 to 2,
+        and exact values like "only 50 acres" or "exactly 10 acres".
         """
         q = question.lower().strip()
         num_pattern = r"[\d.]+"
+        # Accept common variations/typos on "acre(s)" such as "acress".
+        acre_word_pattern = r"acre(?:s|ss)?"
         # Between / range: "between 0.3 and 1 acre", "0.5 to 2 acres", "acre range 0.3 - 1", "b/w 1.5 to 3 acres"
         m = re.search(
             r"(?:between|from)\s+(" + num_pattern + r")\s+(?:and|to|-)\s+(" + num_pattern + r")\s*(?:acre|acres)?",
@@ -583,6 +587,38 @@ class ExcelRAG:
                 return ("<", float(m.group(1)), None)
             except ValueError:
                 pass
+        # Exact / equality cases (only when there is no comparative phrase):
+        # - "only 50 acres", "exactly 10 acre", "acre equal to 5"
+        # - bare "5 acres" / "5 acress" when not combined with "more than", "less than", etc.
+        has_comparator = any(
+            phrase in q
+            for phrase in (
+                "more than",
+                "less than",
+                "at least",
+                "at most",
+                "minimum",
+                "maximum",
+                "above",
+                "over",
+                "below",
+                "under",
+            )
+        )
+        m = re.search(
+            r"(?:only|exact(?:ly)?|equal(?:s)?\s+to)\s+(" + num_pattern + r")\s*" + acre_word_pattern + r"?\b",
+            q,
+            re.I,
+        )
+        if not m and not has_comparator:
+            # Bare "50 acres" / "5 acress" etc. without any comparative language → treat as equality
+            m = re.search(r"\b(" + num_pattern + r")\s*" + acre_word_pattern + r"\b", q, re.I)
+        if m:
+            try:
+                val = float(m.group(1))
+                return ("==", val, None)
+            except ValueError:
+                pass
         return (None, None, None)
 
     @staticmethod
@@ -591,6 +627,7 @@ class ExcelRAG:
         Parse requested count from user text, including formats like:
         - "50 rows", "give me 30"
         - "2k records", "1.5k rows"
+        - "five tables", "ten rows" (word numbers)
         """
         q = (question or "").lower().strip()
         if not q:
@@ -604,8 +641,8 @@ class ExcelRAG:
             except ValueError:
                 pass
 
-        # e.g. 50 rows / 50 records
-        m = re.search(r"\b(\d+)\s*(?:data|records?|rows?|details?|entries)\b", q, re.I)
+        # e.g. 50 rows / 50 records / 5 table data
+        m = re.search(r"\b(\d+)\s*(?:data|records?|rows?|details?|entries|tables?)\b", q, re.I)
         if m:
             try:
                 return max(1, min(int(m.group(1)), 2000))
@@ -619,6 +656,29 @@ class ExcelRAG:
                 return max(1, min(int(m.group(1)), 2000))
             except ValueError:
                 pass
+
+        # Word-based small numbers: "five tables", "ten rows", "three records", etc.
+        word_to_num = {
+            "one": 1,
+            "two": 2,
+            "three": 3,
+            "four": 4,
+            "five": 5,
+            "six": 6,
+            "seven": 7,
+            "eight": 8,
+            "nine": 9,
+            "ten": 10,
+        }
+        m = re.search(
+            r"\b(" + "|".join(word_to_num.keys()) + r")\s*(?:data|records?|rows?|details?|entries|tables?)\b",
+            q,
+            re.I,
+        )
+        if m:
+            w = m.group(1).lower()
+            if w in word_to_num:
+                return max(1, min(word_to_num[w], 2000))
 
         return None
 
@@ -670,9 +730,13 @@ class ExcelRAG:
         Parse question for owner name. Returns the owner name string or None.
         Supports: owner X, owned by X, owner name X, parcels for X, for owner X, owner: X.
         """
-        q = question.strip()
+        q = (question or "").strip()
         if not q:
             return None
+        # If the user only provides an owner-like token (e.g. "Owner_0601"),
+        # treat the whole string as the owner name.
+        if len(q) <= 80 and "owner" not in q.lower() and "owned by" not in q.lower():
+            return q
         # Quoted name: "owner 'John Smith'" or "owner \"Owner_0001\""
         m = re.search(r"(?:owner|owned\s+by|for\s+owner)\s*:?\s*[\'\"]([^\'\"]+)[\'\"]", q, re.I)
         if m:
@@ -695,6 +759,92 @@ class ExcelRAG:
         if m:
             return m.group(1).strip()
         return None
+
+    @staticmethod
+    def _looks_like_parcel_id(token: str) -> bool:
+        """Avoid treating parcel IDs (e.g. 376502-9172) as phone numbers. Real phones usually have + or ()."""
+        t = (token or "").strip()
+        if "+" in t or "(" in t or ")" in t:
+            return False
+        # Parcel ID pattern: 6+ digits, optional hyphen, 4+ digits (e.g. 376502-9172, 893310-3043)
+        return bool(re.match(r"^\d{6,}-?\d{4,}$", re.sub(r"\s", "", t)))
+
+    @staticmethod
+    def _extract_contact_tokens(question: str) -> List[str]:
+        """
+        Extract phone numbers and email addresses from the question so we can
+        look up the matching owner / parcel deterministically.
+        Excludes tokens that look like parcel IDs (e.g. 376502-9172).
+        """
+        q = question or ""
+        tokens: List[str] = []
+        # Email addresses
+        for m in re.finditer(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", q):
+            token = m.group(0).strip()
+            if token and token not in tokens:
+                tokens.append(token)
+        # Phone-like patterns (keep as written, including +, spaces, hyphens, parentheses)
+        for m in re.finditer(r"\+?\d[\d\s\-\(\)]{7,}\d", q):
+            token = re.sub(r"\s+", " ", m.group(0)).strip()
+            if token and token not in tokens and not ExcelRAG._looks_like_parcel_id(token):
+                tokens.append(token)
+        return tokens
+
+    @staticmethod
+    def _extract_requested_fields(question: str) -> List[str]:
+        """
+        Detect when the user is asking for specific fields only
+        (e.g. "only land value", "just the acres", "last sale date").
+        Returns a list of abstract field ids like 'land_value', 'acres', etc.
+        """
+        q = (question or "").lower()
+        fields: List[str] = []
+
+        def wants_only() -> bool:
+            return any(
+                marker in q
+                for marker in (
+                    "only ",
+                    "just ",
+                    "only the ",
+                    "just the ",
+                    "only land value",
+                    "only acres",
+                    "only address",
+                    "only contact",
+                )
+            )
+
+        # Land value
+        if "land value" in q or "value of land" in q:
+            fields.append("land_value")
+        # Acres
+        if "acre" in q or "acres" in q:
+            fields.append("acres")
+        # Last sale date
+        if "last sale date" in q or "last sold date" in q or "sale date" in q:
+            fields.append("last_sale_date")
+        # Address
+        if "address" in q:
+            fields.append("address")
+        # Owner name
+        if "owner" in q and "owner placeholder name" not in q:
+            fields.append("owner")
+        # Contact info
+        if "contact" in q or "phone" in q or "email" in q:
+            fields.append("contact")
+
+        # Return fields when: "only/just" phrasing, or when asking for one thing for a parcel (e.g. "contact info for this parcel id").
+        if not fields:
+            return []
+        if wants_only():
+            return fields
+        # "what will be contact info for this parcel id" / "address for parcel 376502-9172"
+        if ("parcel" in q or "parcel id" in q) and any(
+            phrase in q for phrase in (" for ", " for this ", " for parcel", "what is the ", "what will be ", "contact info", "address for", "land value for")
+        ):
+            return fields
+        return []
 
     def query_by_comparison(
         self,
@@ -760,12 +910,14 @@ class ExcelRAG:
                     continue
             # Acre filter
             if acre_op is not None and acre_val is not None:
-                ac = self._to_float(meta.get(acres_col))
+                ac = self._get_acre_value(meta)
                 if ac is None:
                     continue
                 if acre_op == "between" and acre_high is not None:
                     if not (acre_val <= ac <= acre_high):
                         continue
+                elif acre_op == "==" and ac != acre_val:
+                    continue
                 elif acre_op == ">=" and ac < acre_val:
                     continue
                 elif acre_op == ">" and ac <= acre_val:
@@ -777,12 +929,124 @@ class ExcelRAG:
             out.append(c)
         # Sort by Acres descending, then Land Value descending
         def sort_key(chunk: RAGChunk) -> Tuple[float, float]:
-            a_f = self._to_float(chunk.metadata.get(acres_col)) or 0.0
-            v_f = self._to_float(chunk.metadata.get(land_value_col)) or 0.0
+            a_f = self._get_acre_value(chunk.metadata or {}) or 0.0
+            v_f = self._to_float((chunk.metadata or {}).get(land_value_col)) or 0.0
             return (a_f, v_f)
 
         out.sort(key=sort_key, reverse=True)
         return out[:max_results]
+
+    def _get_acre_value(self, meta: Dict[str, Any]) -> float | None:
+        """Get Acres as float; try 'Acres' and 'Acres ' (trailing space)."""
+        v = meta.get("Acres") if isinstance(meta, dict) else None
+        if v is None and isinstance(meta, dict):
+            v = meta.get("Acres ")
+        return self._to_float(v)
+
+    def _filter_chunks_direct(
+        self,
+        land_value_op: str | None = None,
+        land_value_num: float | None = None,
+        land_value_high: float | None = None,
+        land_use_keyword: str | None = None,
+        acre_op: str | None = None,
+        acre_val: float | None = None,
+        acre_high: float | None = None,
+        owner_name: str | None = None,
+        max_results: int = 25,
+    ) -> List[RAGChunk]:
+        """Filter chunks by acre/land value/land use/owner using direct metadata lookup (fallback when query_by_comparison returns nothing)."""
+        if not self._chunks:
+            return []
+        land_use_col = "Land Use / Use Code"
+        land_value_col = "Land Value"
+        owner_col = "Owner Placeholder Name"
+        out: List[RAGChunk] = []
+        for c in self._chunks:
+            meta = c.metadata or {}
+            if owner_name:
+                raw = (meta.get(owner_col) or "") or ""
+                if owner_name.lower() not in str(raw).lower():
+                    owners_list = meta.get("owners")
+                    if isinstance(owners_list, list):
+                        if not any(owner_name.lower() in str((o or {}).get("owner_name") or "").lower() for o in owners_list if isinstance(o, dict)):
+                            continue
+                    else:
+                        continue
+            if land_value_op is not None and land_value_num is not None:
+                val = self._to_float(meta.get(land_value_col))
+                if val is None:
+                    continue
+                if land_value_op == ">=" and val < land_value_num:
+                    continue
+                if land_value_op == ">" and val <= land_value_num:
+                    continue
+                if land_value_op == "<=" and val > land_value_num:
+                    continue
+                if land_value_op == "<" and val >= land_value_num:
+                    continue
+                if land_value_op == "==" and val != land_value_num:
+                    continue
+                if land_value_op == "between" and land_value_high is not None and not (land_value_num <= val <= land_value_high):
+                    continue
+            if land_use_keyword and land_use_keyword not in str(meta.get(land_use_col) or "").lower():
+                continue
+            if acre_op is not None and acre_val is not None:
+                ac = self._get_acre_value(meta)
+                if ac is None:
+                    continue
+                if acre_op == "between" and acre_high is not None:
+                    if not (acre_val <= ac <= acre_high):
+                        continue
+                elif acre_op == "==" and ac != acre_val:
+                    continue
+                elif acre_op == ">=" and ac < acre_val:
+                    continue
+                elif acre_op == ">" and ac <= acre_val:
+                    continue
+                elif acre_op == "<=" and ac > acre_val:
+                    continue
+                elif acre_op == "<" and ac >= acre_val:
+                    continue
+            out.append(c)
+        def sort_key(chunk: RAGChunk) -> Tuple[float, float]:
+            a_f = self._get_acre_value(chunk.metadata or {}) or 0.0
+            v_f = self._to_float((chunk.metadata or {}).get("Land Value")) or 0.0
+            return (a_f, v_f)
+        out.sort(key=sort_key, reverse=True)
+        return out[:max_results]
+
+    def query_by_contact(self, contact_tokens: List[str], max_results: int = 10) -> List[RAGChunk]:
+        """
+        Filter chunks by matching phone/email contact tokens anywhere in the row metadata.
+        Used for questions like "who owns this number" or "owner details for this email".
+        """
+        if not self._chunks or not contact_tokens:
+            return []
+        tokens_norm = [t.strip().lower() for t in contact_tokens if t.strip()]
+        if not tokens_norm:
+            return []
+        matches: List[RAGChunk] = []
+        for c in self._chunks:
+            meta = c.metadata or {}
+            # Concatenate all metadata values into a single searchable string.
+            vals = []
+            for v in meta.values():
+                if isinstance(v, (dict, list)):
+                    try:
+                        vals.append(json.dumps(v, ensure_ascii=False))
+                    except Exception:
+                        continue
+                else:
+                    vals.append(str(v))
+            haystack = " | ".join(vals).lower()
+            if not haystack:
+                continue
+            if any(tok in haystack for tok in tokens_norm):
+                matches.append(c)
+                if len(matches) >= max_results:
+                    break
+        return matches
 
     def query(self, question: str, top_k: int = 5) -> List[RAGChunk]:
         """
@@ -911,6 +1175,44 @@ class ExcelRAG:
         )
         return any(has_marker(marker) for marker in chat_markers)
 
+    @staticmethod
+    def _get_previous_user_question(
+        question: str,
+        conversation_history: List[Dict[str, str]] | None,
+    ) -> str | None:
+        """
+        If the current question is asking about the *previous* question
+        (e.g. "what was my previous question?"), return the last user
+        message from conversation history. Otherwise return None.
+        """
+        if not conversation_history:
+            return None
+
+        q = (question or "").strip().lower()
+        if not q:
+            return None
+
+        markers = (
+            "previous question",
+            "last question",
+            "earlier question",
+            "what did i ask before",
+            "what did i ask previously",
+            "what did i just ask",
+            "repeat my last question",
+            "repeat my previous question",
+        )
+        if not any(m in q for m in markers):
+            return None
+
+        for turn in reversed(conversation_history):
+            role = (turn.get("role") or "").lower()
+            content = (turn.get("content") or "").strip()
+            if role == "user" and content:
+                return content
+        # We *were* asked about the previous question but there is no earlier user turn.
+        return ""
+
     async def answer(
         self,
         question: str,
@@ -923,6 +1225,117 @@ class ExcelRAG:
         based on them. Optionally include prior conversation so the model
         understands question type and what was already asked.
         """
+        # Handle meta question: "what was my previous question?" deterministically
+        if conversation_history:
+            prev_q = self._get_previous_user_question(question, conversation_history)
+            if prev_q is not None:
+                if prev_q:
+                    return {
+                        "answer": f'Your previous question was: "{prev_q}"',
+                        "contexts": [],
+                    }
+                return {
+                    "answer": "I don't see any earlier user question in this conversation yet.",
+                    "contexts": [],
+                }
+
+        # Deterministic path: specific fields for a specific parcel ID
+        # e.g. "give me only land value for parcel id 893310-3043"
+        pid = self._extract_parcel_id_from_question(question)
+        requested_fields = self._extract_requested_fields(question)
+        if requested_fields:
+            # Prefer parcel-id specific answer when a parcel id is present.
+            if pid:
+                chunks_for_pid = self.query_by_parcel_id(pid)
+                if not chunks_for_pid:
+                    prefix = f"{user_name}, " if user_name else ""
+                    return {
+                        "answer": prefix + f"I couldn't find any parcel with ID {pid} in the dataset.",
+                        "contexts": [],
+                    }
+                meta = chunks_for_pid[0].metadata or {}
+            else:
+                # Fall back to owner-based specific field answer if owner name is present.
+                owner_name = self._parse_owner_filter(question)
+                if not owner_name:
+                    owner_name = None
+                if owner_name:
+                    # Reuse comparison query with owner filter only.
+                    owner_chunks = self.query_by_comparison(
+                        question,
+                        land_value_op=None,
+                        land_value_num=None,
+                        land_value_high=None,
+                        land_use_keyword=None,
+                        acre_op=None,
+                        acre_val=None,
+                        acre_high=None,
+                        owner_name=owner_name,
+                        max_results=1,
+                    )
+                    if not owner_chunks:
+                        prefix = f"{user_name}, " if user_name else ""
+                        return {
+                            "answer": prefix + f"I couldn't find any parcels for owner {owner_name} in the dataset.",
+                            "contexts": [],
+                        }
+                    meta = owner_chunks[0].metadata or {}
+                else:
+                    meta = {}
+
+            pieces: List[str] = []
+            # Use parcel id when available; otherwise, use owner label.
+            pid_label = meta.get("Parcel ID") or meta.get("Parcel ID ") or pid or "-"
+            owner_label = meta.get("Owner Placeholder Name") or meta.get("owner_name") or "-"
+
+            if "land_value" in requested_fields:
+                # Prefer actual dataset value; if missing, fall back to sklearn prediction when we have a parcel id.
+                lv_raw = meta.get("Land Value")
+                if (lv_raw is None or str(lv_raw).strip() == "") and pid_label and pid_label != "-":
+                    pred = predict_land_value_for_parcel_id(str(pid_label))
+                    if pred is not None:
+                        lv = f"{pred:,.0f} (model estimate)"
+                    else:
+                        lv = "-"
+                else:
+                    lv = lv_raw if lv_raw is not None else "-"
+                pieces.append(f"land value is {lv}")
+            if "acres" in requested_fields:
+                ac = meta.get("Acres", "-")
+                pieces.append(f"acres are {ac}")
+            if "last_sale_date" in requested_fields:
+                lsd = meta.get("Last Sale Date") or meta.get("last_sale_date") or meta.get("LastSaleDate") or "-"
+                pieces.append(f"last sale date is {lsd}")
+            if "address" in requested_fields:
+                addr = meta.get("Address", "-")
+                pieces.append(f"address is {addr}")
+            if "owner" in requested_fields:
+                pieces.append(f"owner is {owner_label or '-'}")
+            if "contact" in requested_fields:
+                contact = meta.get("Contact Info") or meta.get("email") or "-"
+                pieces.append(f"contact is {contact}")
+
+            if not pieces:
+                prefix = f"{user_name}, " if user_name else ""
+                target = f"parcel {pid_label}" if pid_label and pid_label != "-" else f"owner {owner_label}"
+                return {
+                    "answer": prefix + f"I found {target}, but the specific fields you asked for are missing.",
+                    "contexts": [],
+                }
+
+            prefix = f"{user_name}, " if user_name else ""
+            if pid_label and pid_label != "-":
+                heading = f"for parcel {pid_label}, "
+            elif owner_label:
+                heading = f"for owner {owner_label}, "
+            else:
+                heading = ""
+            answer_text = prefix + heading + ", ".join(pieces) + "."
+            return {
+                "answer": answer_text,
+                "contexts": [],
+            }
+
         if self._is_behavioral_or_smalltalk_question(question):
             history_prefix = ""
             if conversation_history:
@@ -1050,7 +1463,20 @@ class ExcelRAG:
         if not wants_all_details:
             requested_n = self._parse_requested_amount(q_lower)
 
-        csv_request = any(k in q_lower for k in ("csv", "download csv", "export csv"))
+        csv_request = any(
+            k in q_lower
+            for k in (
+                "csv",
+                "download csv",
+                "export csv",
+                "xlsx",
+                "excel",
+                "spreadsheet",
+                "download xlsx",
+                "download excel",
+                "export xlsx",
+            )
+        )
         owner_list_request = any(k in q_lower for k in ("all owner", "land owner", "owner list", "all the owner"))
         generic_list_request = (
             any(k in q_lower for k in ("list", "show", "give me", "fetch"))
@@ -1092,8 +1518,68 @@ class ExcelRAG:
         land_use_kw = self._parse_land_use_filter(question)
         acre_op, acre_val, acre_high = self._parse_acre_filter(question)
         owner_name = self._parse_owner_filter(question)
+        contact_tokens = self._extract_contact_tokens(question)
 
-        # Deterministic response paths for DB-style utility asks.
+        # Deterministic path for specific contact (phone/email) lookups.
+        # Example: "+1 (981) 211-5476 | owner0665@mail.com\n give me the owner details of this contact number"
+        if contact_tokens:
+            contact_chunks = self.query_by_contact(contact_tokens, max_results=5)
+            if not contact_chunks:
+                prefix = f"{user_name}, " if user_name else ""
+                return {
+                    "answer": prefix + "I couldn't find any parcel or owner linked to that contact in the dataset.",
+                    "contexts": [],
+                }
+            # Build a concise, personalised description of each matching parcel/owner,
+            # explicitly including last sale date when available.
+            lines: List[str] = []
+            for idx, c in enumerate(contact_chunks, start=1):
+                meta = c.metadata or {}
+                parcel_id = meta.get("Parcel ID") or "-"
+                owner = meta.get("Owner Placeholder Name") or meta.get("owner_name") or "-"
+                acres = meta.get("Acres") or "-"
+                land_value = meta.get("Land Value") or "-"
+                land_use = meta.get("Land Use / Use Code") or "-"
+                address = meta.get("Address") or "-"
+                last_sale_date = meta.get("Last Sale Date") or meta.get("last_sale_date") or meta.get("LastSaleDate") or "-"
+                contact = meta.get("Contact Info") or meta.get("email") or "-"
+                lines.append(
+                    f"{idx}. Owner: {owner} | Parcel ID: {parcel_id} | Acres: {acres} | "
+                    f"Land Value: {land_value} | Land Use: {land_use} | Last Sale Date: {last_sale_date} | "
+                    f"Address: {address} | Contact: {contact}"
+                )
+            prefix = f"{user_name}, " if user_name else ""
+            answer_text = prefix + "here are the owner and parcel details linked to that contact:\n" + "\n".join(lines)
+            return {
+                "answer": answer_text,
+                "contexts": [
+                    {"row_index": c.row_index, "metadata": c.metadata, "text": c.text}
+                    for c in contact_chunks
+                ],
+            }
+
+        # Simple "give me N data/table" with no filters: return first N rows so we never hit "no properties".
+        if (
+            requested_n is not None
+            and (generic_list_request or "table" in q_lower or " data" in q_lower or "data" == q_lower.strip())
+            and land_value_op is None
+            and land_use_kw is None
+            and acre_op is None
+            and owner_name is None
+        ):
+            n = min(requested_n, len(self._chunks), 2000)
+            list_chunks = sorted(self._chunks, key=lambda c: c.row_index)[:n]
+            if list_chunks:
+                lines = self._rows_to_brief_lines([c.metadata for c in list_chunks], max_rows=n)
+                return {
+                    "answer": f"Showing {len(list_chunks)} rows:\n{lines}",
+                    "contexts": [
+                        {"row_index": c.row_index, "metadata": c.metadata, "text": c.text}
+                        for c in list_chunks
+                    ],
+                }
+
+        # Deterministic response paths for DB-style utility asks (csv/list/avg, numeric filters, etc.).
         comparison_rows = self.query_by_comparison(
             question,
             land_value_op=land_value_op,
@@ -1106,6 +1592,34 @@ class ExcelRAG:
             owner_name=owner_name,
             max_results=max(2000, requested_n or 50),
         )
+
+        range_query_request = (
+            land_value_op is not None
+            or land_use_kw is not None
+            or acre_op is not None
+            or owner_name is not None
+        )
+        # Fallback: when we have an acre (or other) filter and comparison returned nothing, try direct filter on _chunks (handles key variants like "Acres " or numeric types).
+        if range_query_request and not comparison_rows and self._chunks:
+            fallback = self._filter_chunks_direct(
+                land_value_op=land_value_op,
+                land_value_num=land_value_num,
+                land_value_high=land_value_high,
+                land_use_keyword=land_use_kw,
+                acre_op=acre_op,
+                acre_val=acre_val,
+                acre_high=acre_high,
+                owner_name=owner_name,
+                max_results=max(2000, requested_n or 50),
+            )
+            if fallback:
+                comparison_rows = fallback
+        if range_query_request and not comparison_rows:
+            return {
+                "answer": "I couldn't find any properties matching those filters in the dataset.",
+                "contexts": [],
+            }
+
         selected_rows = [c.metadata for c in (comparison_rows if comparison_rows else self._chunks)]
 
         if avg_value_request:
@@ -1131,13 +1645,6 @@ class ExcelRAG:
                 "contexts": [{"row_index": c.row_index, "metadata": c.metadata, "text": c.text} for c in chunks],
             }
 
-        range_query_request = (
-            land_value_op is not None
-            or land_use_kw is not None
-            or acre_op is not None
-            or owner_name is not None
-        )
-
         if wants_all_details or requested_n is not None or owner_list_request or generic_list_request or range_query_request:
             # Priority:
             # 1) explicit requested amount (e.g. 25, 2k)
@@ -1150,10 +1657,16 @@ class ExcelRAG:
             else:
                 req = 50 if generic_list_request else len(selected_rows)
             req = min(req, 2000)
-            lines = self._rows_to_brief_lines(selected_rows, max_rows=req)
+            # Use the same N chunks for both answer text and contexts (so table view matches).
+            source_chunks = comparison_rows if comparison_rows else self._chunks
+            list_chunks = source_chunks[:req]
+            lines = self._rows_to_brief_lines([c.metadata for c in list_chunks], max_rows=req)
             return {
-                "answer": f"Showing {min(req, len(selected_rows))} rows:\n{lines}",
-                "contexts": [{"row_index": c.row_index, "metadata": c.metadata, "text": c.text} for c in chunks],
+                "answer": f"Showing {len(list_chunks)} rows:\n{lines}",
+                "contexts": [
+                    {"row_index": c.row_index, "metadata": c.metadata, "text": c.text}
+                    for c in list_chunks
+                ],
             }
 
         context_blocks = []
