@@ -346,11 +346,9 @@ function renderStructuredTableFromContexts(contexts) {
   }
   thead.appendChild(trHead);
 
-  // Render body (limit to 2000 rows but usually much less)
+  // Render body (no limit – show all rows returned by the API)
   tbody.innerHTML = "";
-  const MAX_ROWS = 2000;
-  const rowsToRender = metaRows.slice(0, MAX_ROWS);
-  for (const row of rowsToRender) {
+  for (const row of metaRows) {
     const tr = document.createElement("tr");
     for (const h of headers) {
       const td = document.createElement("td");

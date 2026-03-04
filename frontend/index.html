@@ -580,6 +580,80 @@
           justify-content: center;
         }
       }
+
+      /* Dashboard view */
+      .dashboard-view {
+        padding: 20px 24px 40px;
+        max-width: 100%;
+        overflow: auto;
+      }
+      .dashboard-header {
+        margin-bottom: 20px;
+      }
+      .dashboard-header h2 {
+        font-size: 20px;
+        font-weight: 600;
+        margin: 0 0 4px;
+      }
+      .dashboard-subtitle {
+        font-size: 13px;
+        color: var(--text-secondary);
+        margin: 0;
+      }
+      .dashboard-kpi-cards {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 24px;
+      }
+      .dashboard-kpi-card {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 16px;
+        min-width: 140px;
+      }
+      .dashboard-kpi-card .label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-secondary);
+        margin-bottom: 4px;
+      }
+      .dashboard-kpi-card .value {
+        font-size: 18px;
+        font-weight: 600;
+      }
+      .dashboard-charts {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 24px;
+      }
+      @media (max-width: 900px) {
+        .dashboard-charts {
+          grid-template-columns: 1fr;
+        }
+      }
+      .dashboard-chart-wrap {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px;
+      }
+      .dashboard-chart-wrap h3 {
+        font-size: 14px;
+        font-weight: 600;
+        margin: 0 0 12px;
+        color: var(--text-secondary);
+      }
+      .dashboard-chart-wrap canvas {
+        max-height: 280px;
+      }
+      .dashboard-error {
+        color: #f87171;
+        padding: 12px;
+        margin-top: 16px;
+      }
     </style>
   </head>
   <body>
@@ -680,6 +754,27 @@
       </div>
     </main>
 
+    <!-- Dashboard: graph view for KPIs by location and price -->
+    <div id="dashboard-view" class="dashboard-view" style="display: none;">
+      <div class="dashboard-header">
+        <h2>Property dashboard</h2>
+        <p class="dashboard-subtitle">KPIs by location and price (from parcel dataset)</p>
+      </div>
+      <div class="dashboard-kpi-cards" id="dashboard-kpi-cards"></div>
+      <div class="dashboard-charts">
+        <div class="dashboard-chart-wrap">
+          <h3>Average land value by location (top 15)</h3>
+          <canvas id="chart-by-location" width="400" height="280"></canvas>
+        </div>
+        <div class="dashboard-chart-wrap">
+          <h3>Properties by price range</h3>
+          <canvas id="chart-by-price" width="400" height="280"></canvas>
+        </div>
+      </div>
+      <div id="dashboard-error" class="dashboard-error" style="display: none;"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="./main.js" type="module"></script>
   </body>
 </html>

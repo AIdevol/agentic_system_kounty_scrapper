@@ -7,6 +7,7 @@ from fastapi.responses import RedirectResponse
 
 from app.api.v1.king_county import router as king_county_router
 from app.api.v1.dataset_rag import router as dataset_rag_router
+from app.api.v1.dashboard import router as dashboard_router
 
 
 def create_app() -> FastAPI:
@@ -32,6 +33,7 @@ def create_app() -> FastAPI:
     # Versioned API routes
     app.include_router(king_county_router, prefix="/v1/king-county", tags=["king_county"])
     app.include_router(dataset_rag_router, prefix="/v1/dataset-rag", tags=["dataset_rag"])
+    app.include_router(dashboard_router, prefix="/v1/dashboard", tags=["dashboard"])
 
     # Serve frontend publicly at /app/ (anyone can open the app in a browser).
     _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

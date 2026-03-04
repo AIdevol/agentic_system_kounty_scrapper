@@ -398,6 +398,8 @@ class ExcelRAG:
         """
         q = question.lower().strip()
         num_pattern = r"[\d,]+(?:\.[\d]+)?"
+        # When a number is for acres (e.g. "3 acres", "50 acres"), do not treat it as land value.
+        _no_acres = r"(?!\s*\d*\s*(?:acre|acres)\b)"
 
         def num(s: str) -> float:
             return float(s.replace(",", ""))
@@ -424,8 +426,9 @@ class ExcelRAG:
                 pass
 
         # Equal to: "equal to 200000", "value equal to 200000", "exactly 200000", "land value exactly 200000"
+        # Avoid matching cases that clearly refer to acres (e.g. "equal to 3 acres") – those are handled by _parse_acre_filter.
         m = re.search(
-            r"(?:equal\s+to|exactly)\s+\$?\s*(" + num_pattern + r")(?:\s*\$)?",
+            r"(?:equal\s+to|exactly)\s+\$?\s*(" + num_pattern + r")(?:\s*\$)?" + _no_acres,
             q,
             re.I,
         )
@@ -441,9 +444,9 @@ class ExcelRAG:
             except ValueError:
                 pass
 
-        # Under / below: "under 200000", "below 200000", "value under 200000$", "price below X"
+        # Land value / value explicitly with "less than" or "under": "land value less than 50000", "value under 100000"
         m = re.search(
-            r"(?:below|under|less(?:\s+than)?|at\s+most|maximum)\s+(?:\w+\s+)*\$?\s*(" + num_pattern + r")(?:\s*\$)?",
+            r"(?:land\s+value|value|price)\s+(?:is\s+)?(?:below|under|less(?:\s+than)?|at\s+most|maximum)\s+\$?\s*(" + num_pattern + r")(?:\s*\$)?",
             q,
             re.I,
         )
@@ -452,7 +455,19 @@ class ExcelRAG:
                 return ("<=", num(m.group(1)), None)
             except ValueError:
                 pass
-        m = re.search(r"<\s*\$?\s*(" + num_pattern + r")", q)
+        # Under / below: "under 200000", "below 200000", "value under 200000$", "price below X"
+        # Do not treat as land value when the number is for acres (e.g. "less than 3 acres", "less than 50 acres").
+        m = re.search(
+            r"(?:below|under|less(?:\s+than)?|at\s+most|maximum)\s+(?:\w+\s+)*\$?\s*(" + num_pattern + r")(?:\s*\$)?" + _no_acres,
+            q,
+            re.I,
+        )
+        if m:
+            try:
+                return ("<=", num(m.group(1)), None)
+            except ValueError:
+                pass
+        m = re.search(r"<\s*\$?\s*(" + num_pattern + r")" + _no_acres, q)
         if m:
             try:
                 return ("<", num(m.group(1)), None)
@@ -460,19 +475,20 @@ class ExcelRAG:
                 pass
 
         # Above / at least: "above 200000", "at least 200000", "value above 200000$"
+        # Do not treat as land value when the number is for acres (e.g. "greater than 2 acres", "over 50 acres").
         m = re.search(
-            r"(?:above|over|greater(?:\s+than)?|at\s+least|minimum|more\s+than)\s+(?:\w+\s+)*\$?\s*(" + num_pattern + r")(?:\s*\$)?",
+            r"(?:above|over|greater(?:\s+than)?|at\s+least|minimum|more\s+than)\s+(?:\w+\s+)*\$?\s*(" + num_pattern + r")(?:\s*\$)?" + _no_acres,
             q,
             re.I,
         )
         if not m:
-            m = re.search(r"(" + num_pattern + r")\s*\$?\s*(?:and\s+)?(?:above|or\s+more)", q, re.I)
+            m = re.search(r"(" + num_pattern + r")\s*\$?\s*(?:and\s+)?(?:above|or\s+more)" + _no_acres, q, re.I)
         if m:
             try:
                 return (">=", num(m.group(1)), None)
             except ValueError:
                 pass
-        m = re.search(r">\s*\$?\s*(" + num_pattern + r")", q)
+        m = re.search(r">\s*\$?\s*(" + num_pattern + r")" + _no_acres, q)
         if m:
             try:
                 return (">", num(m.group(1)), None)
@@ -480,8 +496,9 @@ class ExcelRAG:
                 pass
 
         # Plain "land value 200000" / "value 200000$" → treat as at least (>=)
+        # Do not treat as land value when followed by acres (e.g. "value 3 acres", "value 50 acres").
         m = re.search(
-            r"(?:land\s+value|value)\s*\$?\s*(" + num_pattern + r")(?:\s*\$)?",
+            r"(?:land\s+value|value)\s*\$?\s*(" + num_pattern + r")(?:\s*\$)?" + _no_acres,
             q,
             re.I,
         )
@@ -523,6 +540,27 @@ class ExcelRAG:
         """
         q = question.lower().strip()
         num_pattern = r"[\d.]+"
+        # Special-case: "less than or equal to 3 acres and greater than 1 acres" (or similar) -> treat as a range.
+        if "acre" in q and "less than or equal to" in q and "greater than" in q:
+            m_high = re.search(
+                r"less\s+than\s+or\s+equal\s+to\s+(" + num_pattern + r")\s*(?:acre|acres)?",
+                q,
+                re.I,
+            )
+            m_low = re.search(
+                r"greater\s+than\s+(" + num_pattern + r")\s*(?:acre|acres)?",
+                q,
+                re.I,
+            )
+            if m_high and m_low:
+                try:
+                    high = float(m_high.group(1))
+                    low = float(m_low.group(1))
+                    if low > high:
+                        low, high = high, low
+                    return ("between", low, high)
+                except ValueError:
+                    pass
         # Accept common variations/typos on "acre(s)" such as "acress".
         acre_word_pattern = r"acre(?:s|ss)?"
         # Between / range: "between 0.3 and 1 acre", "0.5 to 2 acres", "acre range 0.3 - 1", "b/w 1.5 to 3 acres"
@@ -559,14 +597,28 @@ class ExcelRAG:
         )
         if not m:
             m = re.search(r"(" + num_pattern + r")\s*\+\s*(?:acre|acres)", q, re.I)
+        if not m and "acre" in q:
+            # "give me data which have more than 40 acres" etc.
+            m = re.search(r"(?:have\s+)?more\s+than\s+(" + num_pattern + r")", q, re.I)
         if m:
             try:
                 return (">=", float(m.group(1)), None)
             except ValueError:
                 pass
-        # Below / under / less than / maximum acres
+        # Below / under / less than / maximum acres: "acres less than 5", "less than 10 acres", "acres under 2"
         m = re.search(
             r"(?:acre(?:s)?\s+)?(?:below|under|less(?:\s+than)?|at\s+most|maximum)\s+(" + num_pattern + r")\s*(?:acre|acres)?",
+            q,
+            re.I,
+        )
+        if m:
+            try:
+                return ("<=", float(m.group(1)), None)
+            except ValueError:
+                pass
+        # "land with less than 5 acres", "property acres less than 10"
+        m = re.search(
+            r"(?:land|property|parcel)?\s*(?:with\s+)?(?:acre(?:s)?\s+)?(?:less(?:\s+than)?|under|below)\s+(" + num_pattern + r")\s*(?:acre|acres)?",
             q,
             re.I,
         )
@@ -620,6 +672,56 @@ class ExcelRAG:
             except ValueError:
                 pass
         return (None, None, None)
+
+    @staticmethod
+    def _format_range_filter_summary(
+        land_value_op: str | None,
+        land_value_num: float | None,
+        land_value_high: float | None,
+        land_use_keyword: str | None,
+        acre_op: str | None,
+        acre_val: float | None,
+        acre_high: float | None,
+        owner_name: str | None,
+    ) -> str:
+        """Build a short human-readable description of the active filter for the response."""
+        parts: List[str] = []
+        if land_value_op is not None and land_value_num is not None:
+            num_fmt = f"{land_value_num:,.0f}" if land_value_num >= 1000 else str(land_value_num)
+            if land_value_op == "<":
+                parts.append(f"land value under ${num_fmt}")
+            elif land_value_op == "<=":
+                parts.append(f"land value at or under ${num_fmt}")
+            elif land_value_op == ">":
+                parts.append(f"land value over ${num_fmt}")
+            elif land_value_op == ">=":
+                parts.append(f"land value at least ${num_fmt}")
+            elif land_value_op == "==":
+                parts.append(f"land value equal to ${num_fmt}")
+            elif land_value_op == "between" and land_value_high is not None:
+                high_fmt = f"{land_value_high:,.0f}" if land_value_high >= 1000 else str(land_value_high)
+                parts.append(f"land value between ${num_fmt} and ${high_fmt}")
+        if acre_op is not None and acre_val is not None:
+            ac = f"{acre_val}" if acre_val % 1 else f"{int(acre_val)}"
+            if acre_op == "<":
+                parts.append(f"acres less than {ac}")
+            elif acre_op == "<=":
+                parts.append(f"acres at or under {ac}")
+            elif acre_op == ">":
+                parts.append(f"acres over {ac}")
+            elif acre_op == ">=":
+                parts.append(f"acres at least {ac}")
+            elif acre_op == "==":
+                parts.append(f"acres equal to {ac}")
+            elif acre_op == "between" and acre_high is not None:
+                parts.append(f"acres between {acre_val} and {acre_high}")
+        if land_use_keyword:
+            parts.append(f"land use containing '{land_use_keyword}'")
+        if owner_name:
+            parts.append(f"owner matching '{owner_name}'")
+        if not parts:
+            return "your filters"
+        return "; ".join(parts)
 
     @staticmethod
     def _parse_requested_amount(question: str) -> int | None:
@@ -733,9 +835,8 @@ class ExcelRAG:
         q = (question or "").strip()
         if not q:
             return None
-        # If the user only provides an owner-like token (e.g. "Owner_0601"),
-        # treat the whole string as the owner name.
-        if len(q) <= 80 and "owner" not in q.lower() and "owned by" not in q.lower():
+        # Only treat the whole string as owner when it looks like a single owner ID (e.g. "Owner_0601"), not a full sentence.
+        if len(q) <= 45 and " " not in q and re.match(r"^owner_?\d*$", q, re.I):
             return q
         # Quoted name: "owner 'John Smith'" or "owner \"Owner_0001\""
         m = re.search(r"(?:owner|owned\s+by|for\s+owner)\s*:?\s*[\'\"]([^\'\"]+)[\'\"]", q, re.I)
@@ -937,11 +1038,16 @@ class ExcelRAG:
         return out[:max_results]
 
     def _get_acre_value(self, meta: Dict[str, Any]) -> float | None:
-        """Get Acres as float; try 'Acres' and 'Acres ' (trailing space)."""
-        v = meta.get("Acres") if isinstance(meta, dict) else None
-        if v is None and isinstance(meta, dict):
-            v = meta.get("Acres ")
-        return self._to_float(v)
+        """Get Acres as float; try common key variants so filtering works regardless of key casing/spacing."""
+        if not isinstance(meta, dict):
+            return None
+        v = meta.get("Acres") or meta.get("Acres ") or meta.get("acres")
+        if v is not None:
+            return self._to_float(v)
+        for k, val in meta.items():
+            if str(k).strip().lower() == "acres":
+                return self._to_float(val)
+        return None
 
     def _filter_chunks_direct(
         self,
@@ -1213,6 +1319,35 @@ class ExcelRAG:
         # We *were* asked about the previous question but there is no earlier user turn.
         return ""
 
+    @staticmethod
+    def _build_retrieval_query(question: str, conversation_history: List[Dict[str, str]] | None) -> str:
+        """
+        Build the string used for retrieval: previous_context + current_question
+        when conversation_history is present, so retrieval is context-aware.
+        """
+        if not conversation_history:
+            return (question or "").strip()
+        parts: List[str] = []
+        total = 0
+        max_chars = 400  # cap previous context so embedding stays focused
+        for turn in conversation_history[-MAX_HISTORY_TURNS:]:
+            role = (turn.get("role") or "").lower()
+            content = (turn.get("content") or "").strip()
+            if not content:
+                continue
+            if len(content) > 120:
+                content = content[:120].rstrip() + "..."
+            label = "User" if role == "user" else "Assistant"
+            line = f"{label}: {content}"
+            if total + len(line) > max_chars:
+                break
+            parts.append(line)
+            total += len(line)
+        if not parts:
+            return (question or "").strip()
+        previous_context = "\n".join(parts)
+        return f"{previous_context}\n{question}".strip()
+
     async def answer(
         self,
         question: str,
@@ -1482,6 +1617,39 @@ class ExcelRAG:
             any(k in q_lower for k in ("list", "show", "give me", "fetch"))
             and not csv_request
         )
+        investment_intent = any(
+            phrase in q_lower
+            for phrase in (
+                "invest",
+                "investment",
+                "all possible cases",
+                "options to invest",
+                "where to invest",
+                "want to invest",
+                "give me all",
+                "possible cases",
+            )
+        )
+        # User wants reasoning / pros & cons, not a raw data list (e.g. "why you suggest this property", "pros and cons").
+        pros_cons_or_reasoning_intent = any(
+            phrase in q_lower
+            for phrase in (
+                "why you suggest",
+                "why do you suggest",
+                "why suggest",
+                "pros and cons",
+                "pros and con",
+                "advantages and disadvantages",
+                "reasons for",
+                "reasons why",
+                "why this property",
+                "why these properties",
+                "explain why",
+                "reason for suggesting",
+                "points why",
+                "give me points",
+            )
+        )
         avg_value_request = (
             any(k in q_lower for k in ("avg", "average", "mean"))
             and any(k in q_lower for k in ("land value", "property", "cost", "rate", "price"))
@@ -1501,11 +1669,13 @@ class ExcelRAG:
             effective_k = max(top_k, 8)
         # Stay under Groq token-per-request limit (e.g. 6k); cap rows sent in one call
         effective_k = min(effective_k, MAX_ROWS_PER_REQUEST)
+        # Retrieve using previous_context + current_question so retrieval is conversation-aware
+        retrieval_query = self._build_retrieval_query(question, conversation_history)
         # For "what is this file about?" use first N rows so we always have a concrete sample to describe
         if overview_question and self._chunks:
             chunks = sorted(self._chunks, key=lambda c: c.row_index)[:effective_k]
         else:
-            chunks = self.query(question=question, top_k=effective_k)
+            chunks = self.query(question=retrieval_query, top_k=effective_k)
 
         if not chunks:
             return {
@@ -1571,8 +1741,9 @@ class ExcelRAG:
             list_chunks = sorted(self._chunks, key=lambda c: c.row_index)[:n]
             if list_chunks:
                 lines = self._rows_to_brief_lines([c.metadata for c in list_chunks], max_rows=n)
+                intro = f"{(user_name or '').strip()}, here you go.\n\n" if (user_name and str(user_name).strip()) else ""
                 return {
-                    "answer": f"Showing {len(list_chunks)} rows:\n{lines}",
+                    "answer": f"{intro}Showing {len(list_chunks)} rows:\n{lines}",
                     "contexts": [
                         {"row_index": c.row_index, "metadata": c.metadata, "text": c.text}
                         for c in list_chunks
@@ -1615,8 +1786,12 @@ class ExcelRAG:
             if fallback:
                 comparison_rows = fallback
         if range_query_request and not comparison_rows:
+            filter_summary = self._format_range_filter_summary(
+                land_value_op, land_value_num, land_value_high,
+                land_use_kw, acre_op, acre_val, acre_high, owner_name,
+            )
             return {
-                "answer": "I couldn't find any properties matching those filters in the dataset.",
+                "answer": f"I couldn't find any properties with {filter_summary} in the dataset.",
                 "contexts": [],
             }
 
@@ -1645,14 +1820,16 @@ class ExcelRAG:
                 "contexts": [{"row_index": c.row_index, "metadata": c.metadata, "text": c.text} for c in chunks],
             }
 
-        if wants_all_details or requested_n is not None or owner_list_request or generic_list_request or range_query_request:
+        if (wants_all_details or requested_n is not None or owner_list_request or generic_list_request or range_query_request or investment_intent) and not pros_cons_or_reasoning_intent:
             # Priority:
             # 1) explicit requested amount (e.g. 25, 2k)
-            # 2) for range/filter queries, return all matching rows in view
+            # 2) for range/filter queries or investment/all-options intent, return all matching rows (no 50-row cap)
             # 3) otherwise, keep a practical default for generic list asks
             if requested_n is not None:
                 req = requested_n
             elif range_query_request:
+                req = len(selected_rows)
+            elif investment_intent or wants_all_details:
                 req = len(selected_rows)
             else:
                 req = 50 if generic_list_request else len(selected_rows)
@@ -1661,8 +1838,23 @@ class ExcelRAG:
             source_chunks = comparison_rows if comparison_rows else self._chunks
             list_chunks = source_chunks[:req]
             lines = self._rows_to_brief_lines([c.metadata for c in list_chunks], max_rows=req)
+            answer_head = f"Showing {len(list_chunks)} rows"
+            if range_query_request and list_chunks:
+                filter_summary = self._format_range_filter_summary(
+                    land_value_op, land_value_num, land_value_high,
+                    land_use_kw, acre_op, acre_val, acre_high, owner_name,
+                )
+                answer_head = f"Found {len(list_chunks)} properties with {filter_summary}.\n\n{answer_head}"
+            # Personalized intro first (e.g. "Shiva, here are property options that might work for investment.")
+            intro = ""
+            if user_name:
+                name = (user_name or "").strip()
+                if investment_intent:
+                    intro = f"{name}, here are property options that might work for investment.\n\n"
+                else:
+                    intro = f"{name}, here you go.\n\n"
             return {
-                "answer": f"Showing {len(list_chunks)} rows:\n{lines}",
+                "answer": f"{intro}{answer_head}:\n{lines}",
                 "contexts": [
                     {"row_index": c.row_index, "metadata": c.metadata, "text": c.text}
                     for c in list_chunks
@@ -1717,7 +1909,14 @@ class ExcelRAG:
                 )
             )
         )
-        if relation_question:
+        if pros_cons_or_reasoning_intent:
+            instruction = (
+                "The user is asking WHY you suggest these properties and wants pros and cons (or reasons/points). "
+                "Do NOT just list or repeat the raw row data. Based on the sample rows below (location, land value, acres, land use, address), "
+                "give a short reasoning: why these properties might be suggested (e.g. variety of locations, range of values, size). "
+                "Then list Pros (advantages) and Cons (disadvantages or things to consider) in clear bullets. Be concise and use only the data from the rows."
+            )
+        elif relation_question:
             instruction = (
                 "The user is asking about relationships or how the data is structured. "
                 "Explain in two ways: "
@@ -1802,6 +2001,8 @@ class ExcelRAG:
             # Allow long answers when user asks for relationships, full details, overview, or many rows
             if relation_question:
                 max_tok = 2048  # technical + social explanation can be long
+            elif pros_cons_or_reasoning_intent:
+                max_tok = 512  # reasoning + pros and cons
             elif overview_question:
                 max_tok = 512  # file/dataset description: schema + examples
             elif short_answer_intent:
@@ -1826,7 +2027,7 @@ class ExcelRAG:
             if self._looks_weak_answer(answer) and self._chunks:
                 try:
                     wider_k = min(max(len(chunks) + 4, 10), MAX_ROWS_PER_REQUEST)
-                    broader_chunks = self.query(question=question, top_k=wider_k)
+                    broader_chunks = self.query(question=retrieval_query, top_k=wider_k)
                     retry_chunks = self._merge_unique_chunks(chunks, broader_chunks, max_total=MAX_ROWS_PER_REQUEST)
 
                     retry_blocks = []

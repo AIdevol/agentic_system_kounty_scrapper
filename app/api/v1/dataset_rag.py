@@ -4,6 +4,12 @@ from pydantic import BaseModel, Field, ValidationError
 from typing import Any, Dict, List, Union
 
 from llm.parcel_dataset_agent import ParcelDatasetAgent
+from llm.prompts import (
+    get_how_can_i_help_response,
+    get_user_offering_to_help_response,
+    is_how_can_you_help_question,
+    is_user_offering_to_help_question,
+)
 from llm.rag import parse_uploaded_file
 
 
@@ -189,6 +195,19 @@ async def query_parcel_dataset(request: Request) -> DatasetRAGResponse:
             else None
         )
         user_name = (payload.user_name or "").strip() or None
+
+    # When the user asks how the assistant can help, return a personalised response without calling the LLM/RAG.
+    if is_how_can_you_help_question(question):
+        return DatasetRAGResponse(
+            answer=get_how_can_i_help_response(user_name),
+            contexts=[],
+        )
+    # When the user offers to help ("Can I help you?", "What do you need from me?"), thank them and ask what they need.
+    if is_user_offering_to_help_question(question):
+        return DatasetRAGResponse(
+            answer=get_user_offering_to_help_response(user_name),
+            contexts=[],
+        )
 
     agent = ParcelDatasetAgent(top_k=top_k)
     try:
